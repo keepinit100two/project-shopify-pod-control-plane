@@ -50,3 +50,40 @@ class ActionResult(BaseModel):
     status: str = Field(..., description="Outcome: executed, skipped, noop, failed")
     artifact_path: Optional[str] = Field(None, description="Where a draft artifact was stored (if any)")
     reason: str = Field(..., description="Human-readable explanation of what happened")
+
+
+class ShopifyWebhookIngestRequest(BaseModel):
+    """
+    Adapter-specific input schema for Shopify webhooks.
+
+    This model represents the *raw* webhook payload as received
+    from Shopify before normalization into a canonical Event.
+    """
+
+    topic: str = Field(
+        ...,
+        description="Shopify webhook topic (e.g. 'orders/create')",
+    )
+
+    shop_domain: str = Field(
+        ...,
+        description="The Shopify shop domain (e.g. 'example.myshopify.com')",
+    )
+
+    order_id: str = Field(
+        ...,
+        description="Shopify order identifier (stringified for stability)",
+    )
+
+    payload: Dict[str, Any] = Field(
+        ...,
+        description="Raw Shopify webhook JSON payload",
+    )
+
+    idempotency_key: Optional[str] = Field(
+        None,
+        description=(
+            "Optional idempotency key. If not provided, the adapter "
+            "will deterministically derive one from the payload."
+        ),
+    )
