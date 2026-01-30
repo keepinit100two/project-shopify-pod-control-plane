@@ -24,7 +24,18 @@ def test_shopify_ingest_endpoint_valid_payload():
     assert response.status_code == 200
     body = response.json()
 
-    assert body["status"] in {"accepted", "duplicate"}
+    # IngestResponse contract: must include event + decision
+    assert "event" in body
+    assert "decision" in body
+
+    # Event invariants (frontend/admin-visible stable fields)
+    assert body["event"]["source"] == "shopify"
+    assert body["event"]["event_type"] == "orders/create"
+    assert "event_id" in body["event"]
+
+    # Decision must be explainable/stable for UI/admin tooling
+    assert "route" in body["decision"]
+    assert "reason" in body["decision"]
 
 
 def test_shopify_ingest_endpoint_invalid_payload():
