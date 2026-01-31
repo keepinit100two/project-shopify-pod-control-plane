@@ -1,6 +1,7 @@
 from pydantic import BaseModel, Field
 from typing import Any, Dict, Optional
 from datetime import datetime
+from typing import Any, Dict, List, Optional
 import uuid
 
 
@@ -87,3 +88,44 @@ class ShopifyWebhookIngestRequest(BaseModel):
             "will deterministically derive one from the payload."
         ),
     )
+
+
+class PersonalizationInput(BaseModel):
+    """
+    Typed personalization inputs extracted from line item properties.
+    Keep this minimal at first; expand safely later.
+    """
+    pet_name: Optional[str] = Field(None, description="Customer-provided pet name")
+    style: Optional[str] = Field(None, description="Style choice (e.g., 'Watercolor')")
+    photo_url: Optional[str] = Field(None, description="URL to uploaded photo or asset reference")
+
+
+class OrderLineItem(BaseModel):
+    sku: Optional[str] = Field(None, description="SKU if present")
+    variant_id: Optional[str] = Field(None, description="Variant ID if present (string)")
+    quantity: int = Field(..., description="Quantity ordered")
+    personalization: PersonalizationInput = Field(
+        default_factory=PersonalizationInput,
+        description="Extracted personalization inputs for this item",
+    )
+
+
+class RulesSnapshot(BaseModel):
+    """
+    Placeholder for 'policy knobs' captured at decision time.
+    For now, keep it minimal and expand later when you integrate metafields/metaobjects.
+    """
+    snapshot_version: str = Field("v0", description="Snapshot schema version")
+    data: Dict[str, Any] = Field(default_factory=dict, description="Resolved routing knobs")
+
+
+class OrderFulfillmentEvent(BaseModel):
+    """
+    Canonical normalized payload for a Shopify order fulfillment workflow.
+    Stored under Event.metadata['normalized'] to preserve raw payload for audit.
+    """
+    order_id: str = Field(..., description="Shopify order ID (string)")
+    shop_domain: str = Field(..., description="Shop domain for tenancy/audit")
+    topic: str = Field(..., description="Webhook topic/event type (e.g., orders/create)")
+    line_items: List[OrderLineItem] = Field(default_factory=list)
+    rules_snapshot: RulesSnapshot = Field(default_factory=RulesSnapshot)
