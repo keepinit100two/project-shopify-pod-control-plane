@@ -14,6 +14,7 @@ from app.domain.schemas import (
 )
 from app.services.router import route_event
 from app.services.actuator import execute_decision
+from app.services.normalizer import normalize_shopify_order
 
 app = FastAPI(title="AI Control Plane")
 logger = get_logger()
@@ -27,10 +28,11 @@ def health_check():
 def _process_ingest(req: IngestRequest, idempotency_key: str) -> IngestResponse:
     """
     Canonical pipeline runner for all adapters.
-    Ingest -> (Normalize placeholder) -> Decide -> Act -> Observe
+    Ingest -> Normalize (deterministic) -> Decide -> Act -> Observe
 
-    NOTE: Normalize will be introduced as a deterministic transformation step later.
-    For now, Event.payload is the adapter-provided payload.
+    IMPORTANT:
+    - For audit, raw vendor payload remains in Event.payload.
+    - Normalized canonical data (if available) is stored under Event.metadata["normalized"].
     """
 
     # Gate 2: Reuse existing Event if this key was already processed
@@ -102,9 +104,24 @@ def _process_ingest(req: IngestRequest, idempotency_key: str) -> IngestResponse:
         source=req.source,
         timestamp=datetime.utcnow(),
         actor=req.actor,
-        payload=req.payload,
-        metadata=req.metadata,
+        payload=req.payload,   # raw vendor payload stays here for audit
+        metadata=req.metadata, # adapter metadata (and normalized data later)
     )
+
+    # Normalize Shopify orders into canonical fulfillment shape (stored in metadata)
+    if req.source == "shopify":
+        normalized = normalize_shopify_order(
+            payload=req.payload,
+            shop_domain=(req.metadata or {}).get("shop_domain", ""),
+            topic=req.event_type,
+            order_id=(req.metadata or {}).get("order_id", ""),
+        )
+
+        # Attach normalized canonical payload for routing/UI/ops without losing raw payload
+        event.metadata = {
+            **(event.metadata or {}),
+            "normalized": normalized.model_dump(),
+        }
 
     log_event(
         logger,
