@@ -1,7 +1,22 @@
 {
   "security_keywords": ["password", "credential", "security", "breach"],
+
   "required_fields": ["urgency"],
   "clarification_question": "How urgent is this? (low / medium / high)",
   "default_queue": "IT",
-  "default_route": "CREATE_DRAFT_TICKET"
+  "default_route": "CREATE_DRAFT_TICKET",
+
+  "source_policies": {
+    "shopify": {
+      "required_fields": [
+        "metadata.shop_domain",
+        "metadata.order_id",
+        "metadata.normalized.order_id",
+        "metadata.normalized.shop_domain"
+      ],
+      "clarification_question": "Missing required Shopify order fields. Please supply the missing personalization inputs.",
+      "default_route": "SHOPIFY_FULFILLMENT_PLAN",
+      "personalization_required_per_item": ["pet_name", "style"]
+    }
+  }
 }
