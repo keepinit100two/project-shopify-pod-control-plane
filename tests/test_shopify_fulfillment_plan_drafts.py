@@ -1,6 +1,4 @@
 import json
-from pathlib import Path
-
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -12,6 +10,7 @@ def test_shopify_fulfillment_plan_creates_one_draft_per_line_item(tmp_path, monk
     """
     When a Shopify order routes to SHOPIFY_FULFILLMENT_PLAN,
     one draft fulfillment plan artifact should be written per line item.
+    Each artifact should include deterministic POD partner selection.
     """
 
     # Redirect DRAFT_DIR to a temp directory so we don't touch real artifacts
@@ -58,9 +57,14 @@ def test_shopify_fulfillment_plan_creates_one_draft_per_line_item(tmp_path, monk
     artifacts = list(tmp_path.glob("*.fulfillment_plan.item_*.json"))
     assert len(artifacts) == 2
 
-    # Validate structure of one artifact
+    # Validate structure + partner selection of one artifact
     data = json.loads(artifacts[0].read_text(encoding="utf-8"))
     assert data["schema_version"] == "fulfillment_plan_v0"
     assert data["status"] == "DRAFT"
     assert "line_item" in data
-    assert data["partner_selection"]["status"] == "PENDING"
+
+    # Partner selection should now be deterministic and populated
+    assert "partner_selection" in data
+    assert data["partner_selection"]["status"] == "SELECTED"
+    assert data["partner_selection"]["partner"] in {"POD_A", "POD_B"}
+    assert "reason" in data["partner_selection"]

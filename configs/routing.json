@@ -14,9 +14,32 @@
         "metadata.normalized.order_id",
         "metadata.normalized.shop_domain"
       ],
-      "clarification_question": "Missing required Shopify order fields. Please supply the missing personalization inputs.",
+
+      "clarification_question": "Missing required Shopify order information. Please provide the missing personalization inputs.",
+
+      "personalization_required_per_item": [
+        "pet_name",
+        "style"
+      ],
+
       "default_route": "SHOPIFY_FULFILLMENT_PLAN",
-      "personalization_required_per_item": ["pet_name", "style"]
+
+      "pod_partner_rules": [
+        {
+          "match": {
+            "sku_contains": "16x20"
+          },
+          "partner": "POD_B",
+          "reason": "SKU contains 16x20"
+        },
+        {
+          "match": {
+            "default": true
+          },
+          "partner": "POD_A",
+          "reason": "Default partner"
+        }
+      ]
     }
   }
 }
