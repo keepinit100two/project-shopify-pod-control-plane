@@ -39,7 +39,12 @@
           "partner": "POD_A",
           "reason": "Default partner"
         }
-      ]
+      ],
+
+      "dispatch": {
+        "draft_route": "CREATE_DISPATCH_DRAFTS",
+        "mode": "draft_only"
+      }
     }
   }
 }
