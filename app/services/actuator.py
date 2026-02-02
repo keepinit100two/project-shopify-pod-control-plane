@@ -1,7 +1,7 @@
 import json
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from app.domain.schemas import Event, Decision, ActionResult
 
@@ -103,11 +103,68 @@ def _write_fulfillment_plan_drafts(event: Event, decision: Decision) -> List[str
     return artifact_paths
 
 
+def _write_dispatch_request_drafts(event: Event, decision: Decision) -> List[str]:
+    """
+    Write one draft dispatch request artifact per line item.
+
+    This does NOT call partner APIs. It creates inspectable request payloads
+    that can be dispatched in a later phase.
+    """
+    normalized = (event.metadata or {}).get("normalized") or {}
+    line_items = normalized.get("line_items") or []
+
+    config = _load_routing_config()
+    partner_rules = _get_shopify_partner_rules(config)
+
+    artifact_paths: List[str] = []
+
+    for idx, item in enumerate(line_items):
+        artifact_path = DRAFT_DIR / f"{event.event_id}.dispatch_request.item_{idx}.json"
+
+        # Deterministically select partner (same logic as planning)
+        partner_selection = _select_pod_partner_for_item(item, partner_rules)
+        partner = partner_selection.get("partner")
+
+        dispatch_payload: Dict[str, Any] = {
+            "schema_version": "dispatch_request_v0",
+            "event_id": event.event_id,
+            "decision_id": decision.decision_id,
+            "route": decision.route,
+            "status": "DRAFT",
+            # Audit context
+            "order_id": normalized.get("order_id"),
+            "shop_domain": normalized.get("shop_domain"),
+            "topic": normalized.get("topic"),
+            # Per-item scope
+            "line_item_index": idx,
+            "partner": partner,
+            "partner_reason": partner_selection.get("reason"),
+            # Deterministic idempotency key for later real dispatch
+            "idempotency_key": f"dispatch:{event.event_id}:item_{idx}",
+            # What would be sent (placeholder fields allowed at v0)
+            "payload": {
+                "sku": item.get("sku"),
+                "variant_id": item.get("variant_id"),
+                "quantity": item.get("quantity"),
+                "personalization": item.get("personalization"),
+                "shipping": {"status": "PENDING"},
+                "assets": {"status": "PENDING"},
+            },
+            "reason": "Dispatch draft created; awaiting assets and shipping details",
+        }
+
+        _write_json(artifact_path, dispatch_payload)
+        artifact_paths.append(str(artifact_path))
+
+    return artifact_paths
+
+
 def execute_decision(event: Event, decision: Decision) -> ActionResult:
     """
     Act v0: Execute only safe, reversible actions.
     - CREATE_DRAFT_TICKET -> write a local draft JSON artifact
     - SHOPIFY_FULFILLMENT_PLAN -> write per-line-item fulfillment plan draft artifacts (with partner selected)
+    - CREATE_DISPATCH_DRAFTS -> write per-line-item dispatch request draft artifacts (draft-only)
     - REQUEST_MORE_INFO / ESCALATE_HUMAN -> no side effects (noop)
 
     This function is intentionally deterministic and side-effect bounded.
@@ -151,6 +208,20 @@ def execute_decision(event: Event, decision: Decision) -> ActionResult:
             status="executed",
             artifact_path=";".join(artifact_paths) if artifact_paths else None,
             reason=f"Wrote {len(artifact_paths)} fulfillment plan draft artifact(s)",
+        )
+
+    # Dispatch preparation: create per-line-item dispatch request drafts (safe, reversible)
+    if decision.route == "CREATE_DISPATCH_DRAFTS":
+        artifact_paths = _write_dispatch_request_drafts(event, decision)
+
+        return ActionResult(
+            action_id=action_id,
+            event_id=event.event_id,
+            decision_id=decision.decision_id,
+            action_type="create_dispatch_drafts",
+            status="executed",
+            artifact_path=";".join(artifact_paths) if artifact_paths else None,
+            reason=f"Wrote {len(artifact_paths)} dispatch request draft artifact(s)",
         )
 
     # Everything else: no action executed (still a valid result)
