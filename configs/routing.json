@@ -44,6 +44,24 @@
       "dispatch": {
         "draft_route": "CREATE_DISPATCH_DRAFTS",
         "mode": "draft_only"
+      },
+
+      "shopify_admin_updates": {
+        "REQUEST_MORE_INFO": {
+          "tags_add": ["NEEDS_INFO"],
+          "tags_remove": ["PLAN_CREATED", "DISPATCH_DRAFTS_READY"],
+          "note_template": "Order requires more info: {reason}"
+        },
+        "SHOPIFY_FULFILLMENT_PLAN": {
+          "tags_add": ["PLAN_CREATED"],
+          "tags_remove": ["NEEDS_INFO"],
+          "note_template": "Fulfillment plan created (draft). Partners selected per line item."
+        },
+        "CREATE_DISPATCH_DRAFTS": {
+          "tags_add": ["DISPATCH_DRAFTS_READY"],
+          "tags_remove": [],
+          "note_template": "Dispatch drafts created (draft-only). Review before sending to partners."
+        }
       }
     }
   }
