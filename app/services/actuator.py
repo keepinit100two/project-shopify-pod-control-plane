@@ -28,6 +28,64 @@ def _get_shopify_partner_rules(config: Dict[str, Any]) -> List[Dict[str, Any]]:
     )
 
 
+def _get_shopify_admin_update_policy(config: Dict[str, Any]) -> Dict[str, Any]:
+    return (
+        config.get("source_policies", {})
+        .get("shopify", {})
+        .get("shopify_admin_updates", {})
+    )
+
+
+def _render_note(template: str, *, reason: str) -> str:
+    # Minimal template expansion for v0
+    return template.replace("{reason}", reason)
+
+
+def _write_shopify_admin_update_draft(event: Event, decision: Decision) -> str:
+    """
+    Write a draft artifact describing intended Shopify Admin updates (tags + note).
+    No external calls; purely auditable draft output.
+
+    Returns artifact path string if written, else empty string.
+    """
+    if event.source != "shopify":
+        return ""
+
+    config = _load_routing_config()
+    updates = _get_shopify_admin_update_policy(config)
+    policy = updates.get(decision.route)
+
+    if not policy:
+        return ""
+
+    normalized = (event.metadata or {}).get("normalized") or {}
+
+    tags_add = policy.get("tags_add", [])
+    tags_remove = policy.get("tags_remove", [])
+    note_template = policy.get("note_template", "")
+    note = _render_note(note_template, reason=decision.reason) if note_template else ""
+
+    artifact_path = DRAFT_DIR / f"{event.event_id}.shopify_admin_update.{decision.route}.json"
+
+    draft_payload: Dict[str, Any] = {
+        "schema_version": "shopify_admin_update_v0",
+        "event_id": event.event_id,
+        "decision_id": decision.decision_id,
+        "route": decision.route,
+        "status": "DRAFT",
+        # audit context
+        "order_id": normalized.get("order_id"),
+        "shop_domain": normalized.get("shop_domain"),
+        # intended Shopify Admin mutations
+        "tags_add": tags_add,
+        "tags_remove": tags_remove,
+        "note": note,
+    }
+
+    _write_json(artifact_path, draft_payload)
+    return str(artifact_path)
+
+
 def _select_pod_partner_for_item(
     item: Dict[str, Any],
     rules: List[Dict[str, Any]],
@@ -43,28 +101,17 @@ def _select_pod_partner_for_item(
         partner = rule.get("partner")
         reason = rule.get("reason", "Matched partner rule")
 
-        # Rule: sku contains substring
         sku_contains = match.get("sku_contains")
         if isinstance(sku_contains, str) and sku_contains and sku_contains in sku:
             return {"status": "SELECTED", "partner": partner, "reason": reason}
 
-        # Rule: default catch-all
         if match.get("default") is True:
             return {"status": "SELECTED", "partner": partner, "reason": reason}
 
-    # Shouldn't happen if default rule exists
     return {"status": "PENDING", "partner": None, "reason": "No partner rule matched"}
 
 
 def _write_fulfillment_plan_drafts(event: Event, decision: Decision) -> List[str]:
-    """
-    Write one draft fulfillment plan artifact per line item.
-
-    Normalized canonical data is expected at:
-      event.metadata["normalized"]
-
-    Returns a list of artifact paths written.
-    """
     normalized = (event.metadata or {}).get("normalized") or {}
     line_items = normalized.get("line_items") or []
 
@@ -86,14 +133,11 @@ def _write_fulfillment_plan_drafts(event: Event, decision: Decision) -> List[str
             "risk_level": decision.risk_level,
             "reason": decision.reason,
             "status": "DRAFT",
-            # High-value audit context
             "order_id": normalized.get("order_id"),
             "shop_domain": normalized.get("shop_domain"),
             "topic": normalized.get("topic"),
-            # Per-item planning scope
             "line_item_index": idx,
             "line_item": item,
-            # Selected partner (Tier-1 deterministic)
             "partner_selection": partner_selection,
         }
 
@@ -104,12 +148,6 @@ def _write_fulfillment_plan_drafts(event: Event, decision: Decision) -> List[str
 
 
 def _write_dispatch_request_drafts(event: Event, decision: Decision) -> List[str]:
-    """
-    Write one draft dispatch request artifact per line item.
-
-    This does NOT call partner APIs. It creates inspectable request payloads
-    that can be dispatched in a later phase.
-    """
     normalized = (event.metadata or {}).get("normalized") or {}
     line_items = normalized.get("line_items") or []
 
@@ -121,7 +159,6 @@ def _write_dispatch_request_drafts(event: Event, decision: Decision) -> List[str
     for idx, item in enumerate(line_items):
         artifact_path = DRAFT_DIR / f"{event.event_id}.dispatch_request.item_{idx}.json"
 
-        # Deterministically select partner (same logic as planning)
         partner_selection = _select_pod_partner_for_item(item, partner_rules)
         partner = partner_selection.get("partner")
 
@@ -131,17 +168,13 @@ def _write_dispatch_request_drafts(event: Event, decision: Decision) -> List[str
             "decision_id": decision.decision_id,
             "route": decision.route,
             "status": "DRAFT",
-            # Audit context
             "order_id": normalized.get("order_id"),
             "shop_domain": normalized.get("shop_domain"),
             "topic": normalized.get("topic"),
-            # Per-item scope
             "line_item_index": idx,
             "partner": partner,
             "partner_reason": partner_selection.get("reason"),
-            # Deterministic idempotency key for later real dispatch
             "idempotency_key": f"dispatch:{event.event_id}:item_{idx}",
-            # What would be sent (placeholder fields allowed at v0)
             "payload": {
                 "sku": item.get("sku"),
                 "variant_id": item.get("variant_id"),
@@ -162,16 +195,18 @@ def _write_dispatch_request_drafts(event: Event, decision: Decision) -> List[str
 def execute_decision(event: Event, decision: Decision) -> ActionResult:
     """
     Act v0: Execute only safe, reversible actions.
-    - CREATE_DRAFT_TICKET -> write a local draft JSON artifact
-    - SHOPIFY_FULFILLMENT_PLAN -> write per-line-item fulfillment plan draft artifacts (with partner selected)
-    - CREATE_DISPATCH_DRAFTS -> write per-line-item dispatch request draft artifacts (draft-only)
-    - REQUEST_MORE_INFO / ESCALATE_HUMAN -> no side effects (noop)
+    Additionally, for Shopify routes with admin update policy, emit a Shopify Admin Update Draft artifact.
 
-    This function is intentionally deterministic and side-effect bounded.
+    - CREATE_DRAFT_TICKET -> write a local draft JSON artifact
+    - SHOPIFY_FULFILLMENT_PLAN -> write per-line-item fulfillment plan drafts
+    - CREATE_DISPATCH_DRAFTS -> write per-line-item dispatch request drafts
+    - REQUEST_MORE_INFO / ESCALATE_HUMAN -> noop, but may emit admin update draft for Shopify
     """
     action_id = str(uuid.uuid4())
 
-    # Only execute draft ticket creation (safe, reversible)
+    # Always emit Shopify admin update draft when policy exists for this route
+    admin_update_artifact = _write_shopify_admin_update_draft(event, decision)
+
     if decision.route == "CREATE_DRAFT_TICKET":
         artifact_path = DRAFT_DIR / f"{event.event_id}.draft_ticket.json"
 
@@ -196,9 +231,14 @@ def execute_decision(event: Event, decision: Decision) -> ActionResult:
             reason="Draft ticket artifact written",
         )
 
-    # Shopify: create per-line-item fulfillment plan drafts (safe, reversible)
     if decision.route == "SHOPIFY_FULFILLMENT_PLAN":
         artifact_paths = _write_fulfillment_plan_drafts(event, decision)
+
+        # Include admin artifact path in reason for observability (optional)
+        if admin_update_artifact:
+            extra = f" | admin_update={admin_update_artifact}"
+        else:
+            extra = ""
 
         return ActionResult(
             action_id=action_id,
@@ -207,12 +247,16 @@ def execute_decision(event: Event, decision: Decision) -> ActionResult:
             action_type="create_fulfillment_plan_drafts",
             status="executed",
             artifact_path=";".join(artifact_paths) if artifact_paths else None,
-            reason=f"Wrote {len(artifact_paths)} fulfillment plan draft artifact(s)",
+            reason=f"Wrote {len(artifact_paths)} fulfillment plan draft artifact(s){extra}",
         )
 
-    # Dispatch preparation: create per-line-item dispatch request drafts (safe, reversible)
     if decision.route == "CREATE_DISPATCH_DRAFTS":
         artifact_paths = _write_dispatch_request_drafts(event, decision)
+
+        if admin_update_artifact:
+            extra = f" | admin_update={admin_update_artifact}"
+        else:
+            extra = ""
 
         return ActionResult(
             action_id=action_id,
@@ -221,16 +265,16 @@ def execute_decision(event: Event, decision: Decision) -> ActionResult:
             action_type="create_dispatch_drafts",
             status="executed",
             artifact_path=";".join(artifact_paths) if artifact_paths else None,
-            reason=f"Wrote {len(artifact_paths)} dispatch request draft artifact(s)",
+            reason=f"Wrote {len(artifact_paths)} dispatch request draft artifact(s){extra}",
         )
 
-    # Everything else: no action executed (still a valid result)
+    # Everything else: no action executed (still a valid result), but admin update draft may have been written
     return ActionResult(
         action_id=action_id,
         event_id=event.event_id,
         decision_id=decision.decision_id,
         action_type="noop",
         status="noop",
-        artifact_path=None,
+        artifact_path=admin_update_artifact or None,
         reason=f"No action executed for route: {decision.route}",
     )
