@@ -129,3 +129,7 @@ class OrderFulfillmentEvent(BaseModel):
     topic: str = Field(..., description="Webhook topic/event type (e.g., orders/create)")
     line_items: List[OrderLineItem] = Field(default_factory=list)
     rules_snapshot: RulesSnapshot = Field(default_factory=RulesSnapshot)
+    
+
+class OpsDispatchDraftsRequest(BaseModel):
+    idempotency_key: str = Field(..., description="Idempotency key of an already-ingested Shopify event")

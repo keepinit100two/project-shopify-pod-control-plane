@@ -11,6 +11,8 @@ from app.domain.schemas import (
     Event,
     IngestResponse,
     ShopifyWebhookIngestRequest,
+    OpsDispatchDraftsRequest,
+    Decision,
 )
 from app.services.router import route_event
 from app.services.actuator import execute_decision
@@ -117,7 +119,6 @@ def _process_ingest(req: IngestRequest, idempotency_key: str) -> IngestResponse:
             order_id=(req.metadata or {}).get("order_id", ""),
         )
 
-        # Attach normalized canonical payload for routing/UI/ops without losing raw payload
         event.metadata = {
             **(event.metadata or {}),
             "normalized": normalized.model_dump(),
@@ -237,3 +238,61 @@ def ingest_shopify_order_created(
     )
 
     return _process_ingest(req=ingest_req, idempotency_key=effective_key)
+
+
+@app.post("/ops/shopify/dispatch_drafts")
+def ops_shopify_dispatch_drafts(req: OpsDispatchDraftsRequest):
+    """
+    Operator-controlled phase transition.
+
+    Given an idempotency_key for an already-ingested Shopify event,
+    generate dispatch request draft artifacts (no external calls).
+    """
+    existing_event = get_event(req.idempotency_key)
+    if not existing_event:
+        raise HTTPException(
+            status_code=404,
+            detail="Event not found for idempotency_key. Ingest must happen first.",
+        )
+
+    if existing_event.source != "shopify":
+        raise HTTPException(
+            status_code=400,
+            detail="Dispatch drafts are only supported for Shopify events.",
+        )
+
+    decision = Decision(
+        decision_id=str(uuid.uuid4()),
+        event_id=existing_event.event_id,
+        route="CREATE_DISPATCH_DRAFTS",
+        reason="Operator triggered dispatch draft generation",
+        risk_level="low",
+        proposed_action={},
+    )
+
+    log_event(
+        logger,
+        event_name="ops_dispatch_drafts_requested",
+        fields={
+            "idempotency_key": req.idempotency_key,
+            "event_id": existing_event.event_id,
+        },
+    )
+
+    action_result = execute_decision(existing_event, decision)
+
+    log_event(
+        logger,
+        event_name="ops_dispatch_drafts_completed",
+        fields={
+            "idempotency_key": req.idempotency_key,
+            "event_id": existing_event.event_id,
+            "status": action_result.status,
+            "artifact_path": action_result.artifact_path,
+        },
+    )
+
+    return {
+        "event_id": existing_event.event_id,
+        "action_result": action_result.model_dump(),
+    }
