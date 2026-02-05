@@ -1,11 +1,14 @@
 from fastapi.testclient import TestClient
 
 from app.main import app
+from tests.helpers_shopify import shopify_signed_request, DEFAULT_SHOPIFY_SECRET
 
 client = TestClient(app)
 
 
-def test_shopify_ingest_attaches_normalized_metadata():
+def test_shopify_ingest_attaches_normalized_metadata(monkeypatch):
+    monkeypatch.setenv("SHOPIFY_WEBHOOK_SECRET", DEFAULT_SHOPIFY_SECRET)
+
     payload = {
         "topic": "orders/create",
         "shop_domain": "example.myshopify.com",
@@ -25,10 +28,12 @@ def test_shopify_ingest_attaches_normalized_metadata():
         },
     }
 
+    req = shopify_signed_request(payload, idempotency_key="test-normalized-attach-1")
+
     response = client.post(
         "/ingest/shopify/order_created",
-        json=payload,
-        headers={"Idempotency-Key": "test-normalized-attach-1"},
+        content=req["content"],
+        headers=req["headers"],
     )
 
     assert response.status_code == 200
@@ -38,7 +43,6 @@ def test_shopify_ingest_attaches_normalized_metadata():
     assert "normalized" in body["event"]["metadata"]
 
     normalized = body["event"]["metadata"]["normalized"]
-
     assert normalized["order_id"] == "1234567890"
     assert normalized["shop_domain"] == "example.myshopify.com"
     assert len(normalized["line_items"]) == 1

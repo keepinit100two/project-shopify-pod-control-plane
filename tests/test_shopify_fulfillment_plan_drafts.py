@@ -2,6 +2,7 @@ import json
 from fastapi.testclient import TestClient
 
 from app.main import app
+from tests.helpers_shopify import shopify_signed_request, DEFAULT_SHOPIFY_SECRET
 
 client = TestClient(app)
 
@@ -12,8 +13,9 @@ def test_shopify_fulfillment_plan_creates_one_draft_per_line_item(tmp_path, monk
     one draft fulfillment plan artifact should be written per line item.
     Each artifact should include deterministic POD partner selection.
     """
+    monkeypatch.setenv("SHOPIFY_WEBHOOK_SECRET", DEFAULT_SHOPIFY_SECRET)
 
-    # Redirect DRAFT_DIR to a temp directory so we don't touch real artifacts
+    # Redirect DRAFT_DIR to temp so we don't touch real artifacts
     from app.services import actuator
     monkeypatch.setattr(actuator, "DRAFT_DIR", tmp_path)
 
@@ -45,25 +47,24 @@ def test_shopify_fulfillment_plan_creates_one_draft_per_line_item(tmp_path, monk
         },
     }
 
+    req = shopify_signed_request(payload, idempotency_key="artifact-test-key")
+
     response = client.post(
         "/ingest/shopify/order_created",
-        json=payload,
-        headers={"Idempotency-Key": "artifact-test-key"},
+        content=req["content"],
+        headers=req["headers"],
     )
 
     assert response.status_code == 200
 
-    # There should be exactly 2 draft artifacts (one per line item)
     artifacts = list(tmp_path.glob("*.fulfillment_plan.item_*.json"))
     assert len(artifacts) == 2
 
-    # Validate structure + partner selection of one artifact
     data = json.loads(artifacts[0].read_text(encoding="utf-8"))
     assert data["schema_version"] == "fulfillment_plan_v0"
     assert data["status"] == "DRAFT"
     assert "line_item" in data
 
-    # Partner selection should now be deterministic and populated
     assert "partner_selection" in data
     assert data["partner_selection"]["status"] == "SELECTED"
     assert data["partner_selection"]["partner"] in {"POD_A", "POD_B"}

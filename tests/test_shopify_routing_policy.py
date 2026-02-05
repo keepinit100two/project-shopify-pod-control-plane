@@ -1,11 +1,14 @@
 from fastapi.testclient import TestClient
 
 from app.main import app
+from tests.helpers_shopify import shopify_signed_request, DEFAULT_SHOPIFY_SECRET
 
 client = TestClient(app)
 
 
-def test_shopify_missing_personalization_routes_to_request_more_info():
+def test_shopify_missing_personalization_routes_to_request_more_info(monkeypatch):
+    monkeypatch.setenv("SHOPIFY_WEBHOOK_SECRET", DEFAULT_SHOPIFY_SECRET)
+
     payload = {
         "topic": "orders/create",
         "shop_domain": "example.myshopify.com",
@@ -25,10 +28,12 @@ def test_shopify_missing_personalization_routes_to_request_more_info():
         },
     }
 
+    req = shopify_signed_request(payload, idempotency_key="shopify-route-test-1")
+
     r = client.post(
         "/ingest/shopify/order_created",
-        json=payload,
-        headers={"Idempotency-Key": "shopify-route-test-1"},
+        content=req["content"],
+        headers=req["headers"],
     )
     assert r.status_code == 200
     body = r.json()
@@ -36,7 +41,9 @@ def test_shopify_missing_personalization_routes_to_request_more_info():
     assert "Missing personalization field" in body["decision"]["reason"]
 
 
-def test_shopify_complete_personalization_routes_to_fulfillment_plan():
+def test_shopify_complete_personalization_routes_to_fulfillment_plan(monkeypatch):
+    monkeypatch.setenv("SHOPIFY_WEBHOOK_SECRET", DEFAULT_SHOPIFY_SECRET)
+
     payload = {
         "topic": "orders/create",
         "shop_domain": "example.myshopify.com",
@@ -56,10 +63,12 @@ def test_shopify_complete_personalization_routes_to_fulfillment_plan():
         },
     }
 
+    req = shopify_signed_request(payload, idempotency_key="shopify-route-test-2")
+
     r = client.post(
         "/ingest/shopify/order_created",
-        json=payload,
-        headers={"Idempotency-Key": "shopify-route-test-2"},
+        content=req["content"],
+        headers=req["headers"],
     )
     assert r.status_code == 200
     body = r.json()

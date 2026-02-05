@@ -1,17 +1,20 @@
 import json
 
 from fastapi.testclient import TestClient
+
 from app.main import app
+from tests.helpers_shopify import shopify_signed_request, DEFAULT_SHOPIFY_SECRET
 
 client = TestClient(app)
 
 
 def test_shopify_request_more_info_writes_admin_update_draft(tmp_path, monkeypatch):
-    # Redirect DRAFT_DIR to temp so we don't touch real artifacts
+    monkeypatch.setenv("SHOPIFY_WEBHOOK_SECRET", DEFAULT_SHOPIFY_SECRET)
+
+    # Redirect DRAFT_DIR to a temp directory so we don't touch real artifacts
     from app.services import actuator
     monkeypatch.setattr(actuator, "DRAFT_DIR", tmp_path)
 
-    # Missing pet_name triggers REQUEST_MORE_INFO
     payload = {
         "topic": "orders/create",
         "shop_domain": "example.myshopify.com",
@@ -30,17 +33,18 @@ def test_shopify_request_more_info_writes_admin_update_draft(tmp_path, monkeypat
         },
     }
 
+    req = shopify_signed_request(payload, idempotency_key="admin-update-key-1")
+
     r = client.post(
         "/ingest/shopify/order_created",
-        json=payload,
-        headers={"Idempotency-Key": "admin-update-key-1"},
+        content=req["content"],
+        headers=req["headers"],
     )
+
     assert r.status_code == 200
     body = r.json()
-
     assert body["decision"]["route"] == "REQUEST_MORE_INFO"
 
-    # Admin update draft should be written for REQUEST_MORE_INFO
     artifacts = list(tmp_path.glob("*.shopify_admin_update.REQUEST_MORE_INFO.json"))
     assert len(artifacts) == 1
 

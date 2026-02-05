@@ -1,8 +1,10 @@
 from datetime import datetime
 import uuid
+import os
+import json
 from typing import Optional
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Request
 
 from app.core.idempotency import get_event, set_event
 from app.core.logging import get_logger, log_event
@@ -17,6 +19,7 @@ from app.domain.schemas import (
 from app.services.router import route_event
 from app.services.actuator import execute_decision
 from app.services.normalizer import normalize_shopify_order
+from app.services.shopify_security import verify_shopify_hmac_b64
 
 app = FastAPI(title="AI Control Plane")
 logger = get_logger()
@@ -207,18 +210,43 @@ def ingest_api(
 
 
 @app.post("/ingest/shopify/order_created", response_model=IngestResponse)
-def ingest_shopify_order_created(
-    req: ShopifyWebhookIngestRequest,
+async def ingest_shopify_order_created(
+    request: Request,
     idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
+    x_shopify_hmac_sha256: Optional[str] = Header(default=None, alias="X-Shopify-Hmac-Sha256"),
 ) -> IngestResponse:
     """
-    Shopify webhook ingest endpoint (Tier-1).
+    Shopify webhook ingest endpoint (Tier-1, strict HMAC verification).
 
-    Shopify does not reliably provide your custom Idempotency-Key header, so:
-    - if header is present: use it
-    - else if req.idempotency_key is provided: use it
-    - else: deterministically derive a safe key from shop + topic + order_id
+    Strict mode:
+      - Missing or invalid X-Shopify-Hmac-Sha256 => 401
     """
+    secret = os.environ.get("SHOPIFY_WEBHOOK_SECRET")
+    if not secret:
+        raise HTTPException(status_code=500, detail="SHOPIFY_WEBHOOK_SECRET is not set")
+
+    raw_body = await request.body()
+
+    if not x_shopify_hmac_sha256:
+        log_event(logger, "ingest_rejected", {"reason": "missing_shopify_hmac"})
+        raise HTTPException(status_code=401, detail="Missing Shopify webhook signature")
+
+    if not verify_shopify_hmac_b64(secret, raw_body, x_shopify_hmac_sha256):
+        log_event(logger, "ingest_rejected", {"reason": "invalid_shopify_hmac"})
+        raise HTTPException(status_code=401, detail="Invalid Shopify webhook signature")
+
+    # Parse JSON only after signature verification
+    try:
+        data = json.loads(raw_body.decode("utf-8"))
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    # Validate against adapter schema
+    try:
+        req = ShopifyWebhookIngestRequest(**data)
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
     effective_key = (
         idempotency_key
         or req.idempotency_key
