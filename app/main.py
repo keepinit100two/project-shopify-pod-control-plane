@@ -40,7 +40,6 @@ def _process_ingest(req: IngestRequest, idempotency_key: str) -> IngestResponse:
     - Normalized canonical data (if available) is stored under Event.metadata["normalized"].
     """
 
-    # Gate 2: Reuse existing Event if this key was already processed
     existing_event = get_event(idempotency_key)
     if existing_event:
         log_event(
@@ -54,7 +53,6 @@ def _process_ingest(req: IngestRequest, idempotency_key: str) -> IngestResponse:
             },
         )
 
-        # Decide
         decision = route_event(existing_event)
         log_event(
             logger,
@@ -68,14 +66,11 @@ def _process_ingest(req: IngestRequest, idempotency_key: str) -> IngestResponse:
             },
         )
 
-        # Act (safe execution)
         try:
             action_result = execute_decision(existing_event, decision)
             log_event(
                 logger,
-                event_name="action_executed"
-                if action_result.status == "executed"
-                else "action_noop",
+                event_name="action_executed" if action_result.status == "executed" else "action_noop",
                 fields={
                     "action_id": action_result.action_id,
                     "event_id": action_result.event_id,
@@ -97,23 +92,20 @@ def _process_ingest(req: IngestRequest, idempotency_key: str) -> IngestResponse:
                     "error": str(e),
                 },
             )
-            # We do not fail the whole request in Tier-1 v0; we stay observable and safe.
             return IngestResponse(event=existing_event, decision=decision)
 
         return IngestResponse(event=existing_event, decision=decision)
 
-    # New Event
     event = Event(
         event_id=str(uuid.uuid4()),
         event_type=req.event_type,
         source=req.source,
         timestamp=datetime.utcnow(),
         actor=req.actor,
-        payload=req.payload,   # raw vendor payload stays here for audit
-        metadata=req.metadata, # adapter metadata (and normalized data later)
+        payload=req.payload,
+        metadata=req.metadata,
     )
 
-    # Normalize Shopify orders into canonical fulfillment shape (stored in metadata)
     if req.source == "shopify":
         normalized = normalize_shopify_order(
             payload=req.payload,
@@ -121,7 +113,6 @@ def _process_ingest(req: IngestRequest, idempotency_key: str) -> IngestResponse:
             topic=req.event_type,
             order_id=(req.metadata or {}).get("order_id", ""),
         )
-
         event.metadata = {
             **(event.metadata or {}),
             "normalized": normalized.model_dump(),
@@ -138,7 +129,6 @@ def _process_ingest(req: IngestRequest, idempotency_key: str) -> IngestResponse:
         },
     )
 
-    # Decide
     decision = route_event(event)
     log_event(
         logger,
@@ -152,10 +142,8 @@ def _process_ingest(req: IngestRequest, idempotency_key: str) -> IngestResponse:
         },
     )
 
-    # Persist Event for idempotency
     set_event(idempotency_key, event)
 
-    # Act (safe execution)
     try:
         action_result = execute_decision(event, decision)
         log_event(
@@ -182,7 +170,6 @@ def _process_ingest(req: IngestRequest, idempotency_key: str) -> IngestResponse:
                 "error": str(e),
             },
         )
-        # We do not fail the whole request in Tier-1 v0; we stay observable and safe.
         return IngestResponse(event=event, decision=decision)
 
     return IngestResponse(event=event, decision=decision)
@@ -193,7 +180,6 @@ def ingest_api(
     req: IngestRequest,
     idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
 ) -> IngestResponse:
-    # Gate 1: Idempotency-Key is required for generic ingest
     if not idempotency_key:
         log_event(
             logger,
@@ -217,9 +203,7 @@ async def ingest_shopify_order_created(
 ) -> IngestResponse:
     """
     Shopify webhook ingest endpoint (Tier-1, strict HMAC verification).
-
-    Strict mode:
-      - Missing or invalid X-Shopify-Hmac-Sha256 => 401
+    Missing/invalid X-Shopify-Hmac-Sha256 => 401.
     """
     secret = os.environ.get("SHOPIFY_WEBHOOK_SECRET")
     if not secret:
@@ -235,13 +219,11 @@ async def ingest_shopify_order_created(
         log_event(logger, "ingest_rejected", {"reason": "invalid_shopify_hmac"})
         raise HTTPException(status_code=401, detail="Invalid Shopify webhook signature")
 
-    # Parse JSON only after signature verification
     try:
         data = json.loads(raw_body.decode("utf-8"))
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
 
-    # Validate against adapter schema
     try:
         req = ShopifyWebhookIngestRequest(**data)
     except Exception as e:
@@ -273,8 +255,8 @@ def ops_shopify_dispatch_drafts(req: OpsDispatchDraftsRequest):
     """
     Operator-controlled phase transition.
 
-    Given an idempotency_key for an already-ingested Shopify event,
-    generate dispatch request draft artifacts (no external calls).
+    mode="draft"        -> CREATE_DISPATCH_DRAFTS (write dispatch request draft artifacts)
+    mode="execute_mock" -> EXECUTE_DISPATCH_MOCK (call mock partner service and write partner job result artifacts)
     """
     existing_event = get_event(req.idempotency_key)
     if not existing_event:
@@ -286,24 +268,28 @@ def ops_shopify_dispatch_drafts(req: OpsDispatchDraftsRequest):
     if existing_event.source != "shopify":
         raise HTTPException(
             status_code=400,
-            detail="Dispatch drafts are only supported for Shopify events.",
+            detail="Dispatch ops are only supported for Shopify events.",
         )
+
+    route = "CREATE_DISPATCH_DRAFTS" if req.mode == "draft" else "EXECUTE_DISPATCH_MOCK"
 
     decision = Decision(
         decision_id=str(uuid.uuid4()),
         event_id=existing_event.event_id,
-        route="CREATE_DISPATCH_DRAFTS",
-        reason="Operator triggered dispatch draft generation",
+        route=route,
+        reason=f"Operator triggered dispatch flow (mode={req.mode})",
         risk_level="low",
         proposed_action={},
     )
 
     log_event(
         logger,
-        event_name="ops_dispatch_drafts_requested",
+        event_name="ops_dispatch_requested",
         fields={
             "idempotency_key": req.idempotency_key,
             "event_id": existing_event.event_id,
+            "mode": req.mode,
+            "route": route,
         },
     )
 
@@ -311,10 +297,11 @@ def ops_shopify_dispatch_drafts(req: OpsDispatchDraftsRequest):
 
     log_event(
         logger,
-        event_name="ops_dispatch_drafts_completed",
+        event_name="ops_dispatch_completed",
         fields={
             "idempotency_key": req.idempotency_key,
             "event_id": existing_event.event_id,
+            "mode": req.mode,
             "status": action_result.status,
             "artifact_path": action_result.artifact_path,
         },

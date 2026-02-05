@@ -2,6 +2,7 @@ from pydantic import BaseModel, Field
 from typing import Any, Dict, Optional
 from datetime import datetime
 from typing import Any, Dict, List, Optional
+from typing import Literal
 import uuid
 
 
@@ -133,3 +134,7 @@ class OrderFulfillmentEvent(BaseModel):
 
 class OpsDispatchDraftsRequest(BaseModel):
     idempotency_key: str = Field(..., description="Idempotency key of an already-ingested Shopify event")
+    mode: Literal["draft", "execute_mock"] = Field(
+        "draft",
+        description="draft = write dispatch request drafts; execute_mock = call mock partner API and record results",
+    )
